@@ -31,10 +31,10 @@ car_type_test = car_type_root + "\car_data\car_data\test";
 car_type_train = car_type_root + "\car_data\car_data\train";
 
 % Display the root paths to each data set
-disp(['Colour Classification Path: ', colour_classification_path]);
+disp(['Colour Classification Path: ', colour_classification_root]);
 disp(['License Plate Characters Path: ', license_plate_chars_path]);
 disp(['License Plate Segmentation Path: ', license_plate_segmentation_path]);
-disp(['Car Type Path: ', car_type_path]);
+disp(['Car Type Path: ', car_type_root]);
 
 %%  Preprocessing
 % Define output directories for preprocessed images
