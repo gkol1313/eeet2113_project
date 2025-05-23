@@ -1,4 +1,52 @@
 close all;clc; clear all;
+
+function data = preprocessData(data,inputSize)
+    for ii = 1:size(data,1)
+        I = data{ii,1};
+        imgSize = size(I);
+        bboxes = data{ii,2};
+        I = imresize(I,inputSize(1:2));
+        scale = inputSize(1:2)./imgSize(1:2);
+        bboxes = bboxresize(bboxes,scale);
+        data(ii,1:2) = {I,bboxes};
+    end
+end
+
+function data = augmentData(A)
+% Apply random horizontal flipping, and random X/Y scaling. Boxes that get
+% scaled outside the bounds are clipped if the overlap is above 0.25. Also,
+% jitter image color.
+
+    data = cell(size(A));
+    for ii = 1:size(A,1)
+        I = A{ii,1};
+        bboxes = A{ii,2};
+        labels = A{ii,3};
+        sz = size(I);
+    
+        % Apply random color jitter.
+        I = jitterColorHSV(I,"Brightness",0.4,"Contrast",0.4,"Saturation",0.4, "Hue",0.3);
+    
+        % Randomly flip image and apply scaling and rotation and shearing
+        tform = randomAffine2d(XReflection=true, Scale=[0.9 1.1], XTranslation=[-15 15], YTranslation=[-15 15]);
+        rout = affineOutputView(sz,tform,BoundsStyle="centerOutput");
+        I = imwarp(I,tform,OutputView=rout);
+    
+        % % Transform bounding boxes
+        [bboxes, indices] = bboxwarp(bboxes, tform, rout, 'OverlapThreshold', 0.4);
+        labels = labels(indices);
+       
+        I = imgaussfilt(I, rand() * 0.7); % Random standard deviation up to 0.7
+        % Return original data only when all boxes are removed by warping.
+        if isempty(indices)
+            data(ii,:) = A(ii,:);
+        else
+            data(ii,:) = {I,bboxes,labels};
+        end
+    end
+end
+
+
 %% Download datasets
 % This script will require 'pip install kagglehub'
 insert(py.sys.path, int32(0), 'download_data.py');
@@ -66,65 +114,41 @@ for i = 1:length(annotationFiles)
     % Assign the same label to all bounding boxes
     labels{i} = repmat("licensePlate", size(bboxMatrix, 1), 1);
 
-    % Store image path
     imgPaths{i, 1} = imgName;
 end
 
-% Convert to table format for boxLabelDatastore
 data = table(imgPaths, bBoxes, labels, 'VariableNames', {'imageFilename', 'licensePlate', 'Labels'});
+inputSize = [224 224 3];
 
 shuffledIndices = randperm(height(data));
-idx = floor(0.65 * length(shuffledIndices) );
+idx = floor(0.7 * length(shuffledIndices) );
 
 trainingIdx = 1:idx;
-trainingData = data(shuffledIndices(trainingIdx),:);
+trainingDataTbl = data(shuffledIndices(trainingIdx),:);
+trainingData = combine(imageDatastore(trainingDataTbl{:, "imageFilename"}), boxLabelDatastore(trainingDataTbl(:, "licensePlate")));
+trainingData = transform(trainingData,@(data)preprocessData(data,inputSize));
+boxData = readall(trainingData);
+boxData = boxLabelDatastore(table(boxData(:, 2)));
 
-validationIdx = idx+1 : idx + 1 + floor(0.1 * length(shuffledIndices) );
-validationData = data(shuffledIndices(validationIdx),:);
+validationIdx = idx+1 : idx + 1 + floor(0.2 * length(shuffledIndices) );
+validationDataTbl = data(shuffledIndices(validationIdx),:);
+validationData = combine(imageDatastore(validationDataTbl{:, "imageFilename"}), boxLabelDatastore(validationDataTbl(:, "licensePlate")));
+validationData = transform(validationData,@(data)preprocessData(data,inputSize));
 
 testIdx = validationIdx(end)+1 : length(shuffledIndices);
-testData = data(shuffledIndices(testIdx),:);
+testDataTbl = data(shuffledIndices(testIdx),:);
+testData = combine(imageDatastore(testDataTbl{:, "imageFilename"}), boxLabelDatastore(testDataTbl(:, "licensePlate")));
+testData = transform(testData,@(data)preprocessData(data,inputSize));
 
-imdsTrain = imageDatastore(trainingData{:,"imageFilename"});
-bldsTrain = boxLabelDatastore(trainingData(:,"licensePlate"));
-
-imdsValidation = imageDatastore(validationData{:,"imageFilename"});
-bldsValidation = boxLabelDatastore(validationData(:,"licensePlate"));
-
-imdsTest = imageDatastore(testData{:,"imageFilename"});
-bldsTest = boxLabelDatastore(testData(:,"licensePlate"));
-
-trainingData = combine(imdsTrain,bldsTrain);
-validationData = combine(imdsValidation,bldsValidation);
-testData = combine(imdsTest,bldsTest);
-data = read(trainingData);
-I = data{1};
-bBox = data{2};
+annotateTest = read(trainingData);
+I = annotateTest{1};
+bBox = annotateTest{2};
 annotatedImage = insertShape(I,"rectangle",bBox);
 annotatedImage = imresize(annotatedImage,2);
 figure
 imshow(annotatedImage)
-inputSize = [224 224 3];
+
 reset(trainingData);
-
-
-function data = preprocessData(data,inputSize)
-    for ii = 1:size(data,1)
-        I = data{ii,1};
-        imgSize = size(I);
-        bboxes = data{ii,2};
-        I = imresize(I,inputSize(1:2));
-        scale = inputSize(1:2)./imgSize(1:2);
-        bboxes = bboxresize(bboxes,scale);
-        data(ii,1:2) = {I,bboxes};
-    end
-end
-
-preprocessedTrainingData = transform(trainingData,@(data)preprocessData(data,inputSize));
-
-preprocessedValidationData = transform(validationData, @(data)preprocessData(data,inputSize));
-
-preprocessedTestData = transform(testData, @(data)preprocessData(data,inputSize));
 
 
 maxNumAnchors = 32;
@@ -132,7 +156,7 @@ meanIoU = zeros([maxNumAnchors,1]);
 anchorBoxes = cell(maxNumAnchors, 1);
 for k = 1:maxNumAnchors
     % Estimate anchors and mean IoU.
-    [anchorBoxes{k},meanIoU(k)] = estimateAnchorBoxes(preprocessedTrainingData,k);
+    [anchorBoxes{k},meanIoU(k)] = estimateAnchorBoxes(boxData,k);
 end
 figure
 plot(1:maxNumAnchors,meanIoU,'-o')
@@ -141,47 +165,7 @@ xlabel("Number of Anchors")
 title("Number of Anchors vs. Mean IoU")
 
 
-function data = augmentData(A)
-% Apply random horizontal flipping, and random X/Y scaling. Boxes that get
-% scaled outside the bounds are clipped if the overlap is above 0.25. Also,
-% jitter image color.
-
-data = cell(size(A));
-for ii = 1:size(A,1)
-    I = A{ii,1};
-    bboxes = A{ii,2};
-    labels = A{ii,3};
-    sz = size(I);
-
-    % Apply random color jitter.
-    I = jitterColorHSV(I,"Brightness",0.2,"Contrast",0.2,"Saturation",0.2, "Hue",0.1);
-    
-    % Randomly flip image and apply scaling and rotation and shearing
-    tform = randomAffine2d(XReflection=true, Scale=[0.9 1.1]);
-    rout = affineOutputView(sz,tform,BoundsStyle="centerOutput");
-    I = imwarp(I,tform,OutputView=rout);
-
-    % % Transform bounding boxes
-     [bboxes, indices] = bboxwarp(bboxes, tform, rout, 'OverlapThreshold', 0.4);
-     labels = labels(indices);
-
-    I = imgaussfilt(I, rand() * 0.7); % Random standard deviation up to 0.7
-
-    % Return original data only when all boxes are removed by warping.
-    if isempty(indices)
-        data(ii,:) = A(ii,:);
-    else
-        data(ii,:) = {I,bboxes,labels};
-    end
-end
-end
-
-
-augmentedTrainingData = transform(preprocessedTrainingData,@augmentData);
-
-inputSize = [224 224 3];
-
-
+augmentedTrainingData = transform(trainingData,@augmentData);
 augmentedData = cell(8,1);
 for k = 1:8
     data = read(augmentedTrainingData);
@@ -192,10 +176,6 @@ figure
 montage(augmentedData,BorderSize=10)
 reset(augmentedTrainingData);
 
-
-
-
-
 if ~exist("trained_detector.mat", 'file') % perform training if file does not exist
     inputSize = [224 224 3];
     baseNet = imagePretrainedNetwork("resnet50");
@@ -204,35 +184,32 @@ if ~exist("trained_detector.mat", 'file') % perform training if file does not ex
 
     newInputLayer = imageInputLayer(imageSize,Normalization="none",Name=layerName);
     dlnet = replaceLayer(baseNet,layerName,newInputLayer);
-    featureExtractionLayers = ["activation_22_relu", "activation_36_relu", "activation_46_relu"];
+    featureExtractionLayers = ["activation_34_relu", "activation_44_relu"];
     className = "licensePlate";
 
-    numAnchors = 16;
-    [anchors,meanIoU] = estimateAnchorBoxes(preprocessedTrainingData,numAnchors);
+    numAnchors = 6;
+    [anchors,meanIoU] = estimateAnchorBoxes(boxData,numAnchors);
     area = anchors(:, 1).*anchors(:,2);
     [~,idx] = sort(area,"descend");
 
     anchors = anchors(idx,:);
-    anchorBoxes = {anchors(1:6,:)
-        anchors(7:11,:)
-        anchors(12:16,:)};
+    anchorBoxes = {anchors(1:3,:);anchors(4:6,:)};
 
     detector = yolov4ObjectDetector(dlnet,className,anchorBoxes, ...
         DetectionNetworkSource=featureExtractionLayers, InputSize=inputSize);%
 
     % Training options
-options = trainingOptions('sgdm', ...
-    'MiniBatchSize', 16, ...
-    'InitialLearnRate', 0.0001, ...
-    'Momentum', 0.9, ...
-    'MaxEpochs', 100, ...
-    'Shuffle', 'every-epoch', ...
-    'ValidationData', preprocessedValidationData, ...
-    'ValidationFrequency', 5, ...
-    'Verbose', true, ...
-    'Plots', 'training-progress', ...
-    'CheckpointPath', tempdir, ...
-    'ExecutionEnvironment', 'auto');
+    options = trainingOptions('adam', ...
+    InitialLearnRate=0.00002, ...
+    LearnRateSchedule='cyclical', ...
+    shuffle= 'every-epoch',...
+    LearnRateDropFactor=0.5, ...
+    ValidationData=validationData,...
+    MiniBatchSize=2, ...
+    MaxEpochs=80, ...
+    ResetInputNormalization=true, ...
+    ValidationPatience=20, ...           
+    VerboseFrequency=5);
 
 
     plateDetector = trainYOLOv4ObjectDetector(augmentedTrainingData, detector, options);
@@ -242,7 +219,7 @@ else
     plateDetector = load("trained_detector.mat", "plateDetector").plateDetector;
 end
 
-data = read(preprocessedTestData);
+data = read(testData);
 I = data{1};
 [bboxes,scores,labels] = detect(plateDetector, I);
 % Apply Non-Maximum Suppression (NMS)
@@ -255,8 +232,8 @@ I = insertObjectAnnotation(I,"rectangle",selectedBboxes,selectedScores);
 figure
 imshow(I)
 
-detectionResults = detect(plateDetector,preprocessedTestData,Threshold=0.5);
-metrics = evaluateObjectDetection(detectionResults,preprocessedTestData);
+detectionResults = detect(plateDetector,testData,Threshold=0.5);
+metrics = evaluateObjectDetection(detectionResults,testData);
 AP = averagePrecision(metrics);
 [precision,recall] = precisionRecall(metrics,ClassName="licensePlate");
 
@@ -269,8 +246,8 @@ title(sprintf("Average Precision = %.2f",AP))
 
 
 figure
-for i = 1:numel(preprocessedTestData.UnderlyingDatastores{1, 1}.UnderlyingDatastores{1, 1}.Files)
-    data = read(preprocessedTestData);
+for i = 1:numel(testData.UnderlyingDatastores{1, 1}.UnderlyingDatastores{1, 1}.Files)
+    data = read(testData);
     I = data{1};
     [bboxes,scores,labels] = detect(plateDetector, I);
     % Apply Non-Maximum Suppression (NMS)
